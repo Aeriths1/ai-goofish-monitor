@@ -6,7 +6,15 @@ import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import src.scraper as scraper
+from src.failure_guard import FailureGuard
 from src.services.search_pagination import PageAdvanceResult
+
+FORBIDDEN_LAUNCH_FLAGS = (
+    "--disable-web-security",
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+)
 
 
 def test_user_validation_block_reason_detects_equivalent_payloads():
@@ -189,6 +197,8 @@ class _Page:
     async def goto(self, url, **_kwargs):
         self.url = url
         self.events.append(("goto", url))
+        if self.script.get("error") == "homepage":
+            raise RuntimeError("homepage failed")
         if self.script.get("error") == "timeout":
             raise PlaywrightTimeoutError("detail timeout")
         if self.script.get("error") == "boom":
@@ -220,21 +230,32 @@ class _Page:
 
 
 class _Context:
-    def __init__(self, events, scripts):
+    def __init__(self, events, scripts, homepage_failures):
         self.events = events
         self.scripts = list(scripts)
+        self.homepage_failures = homepage_failures
+        self.scripts_added = []
         self._pages = 0
+
+    async def add_init_script(self, script):
+        self.scripts_added.append(script)
+        self.events.append(("init_script", script))
 
     async def new_page(self):
         self.events.append(("new_page", self._pages))
         self._pages += 1
         if self._pages == 1:
+            script = {}
+            if self.homepage_failures[0] > 0:
+                self.homepage_failures[0] -= 1
+                script = {"error": "homepage"}
             return _Page(
                 self.events,
                 _Response(
                     {"data": {"resultList": []}},
                     url="https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/",
                 ),
+                script,
             )
         script = self.scripts.pop(0) if self.scripts else {"body": _success_detail()}
         return _Page(
@@ -250,33 +271,36 @@ class _Context:
 
 
 class _Browser:
-    def __init__(self, events, scripts):
+    def __init__(self, events, scripts, homepage_failures):
         self.events = events
         self.scripts = scripts
+        self.homepage_failures = homepage_failures
 
     async def new_context(self, **_kwargs):
-        self.events.append(("context",))
-        return _Context(self.events, self.scripts)
+        self.events.append(("context", _kwargs))
+        return _Context(self.events, self.scripts, self.homepage_failures)
 
     async def close(self):
         self.events.append(("close",))
 
 
 class _Chromium:
-    def __init__(self, events, scripts):
+    def __init__(self, events, scripts, homepage_failures):
         self.events = events
         self.scripts = scripts
+        self.homepage_failures = homepage_failures
 
     async def launch(self, **kwargs):
         self.events.append(("launch", kwargs))
-        return _Browser(self.events, self.scripts)
+        return _Browser(self.events, self.scripts, self.homepage_failures)
 
 
 class _Playwright:
-    def __init__(self, events, scripts):
+    def __init__(self, events, scripts, homepage_failures):
         self.events = events
         self.scripts = scripts
-        self.chromium = _Chromium(events, scripts)
+        self.homepage_failures = homepage_failures
+        self.chromium = _Chromium(events, scripts, homepage_failures)
 
     async def __aenter__(self):
         return self
@@ -309,7 +333,44 @@ def _detail_gotos(events):
     return urls
 
 
-def _run_scrape(monkeypatch, tmp_path, scripts):
+def _launches(events):
+    return [event[1] for event in events if event[0] == "launch"]
+
+
+def _assert_sandbox_kept(launch):
+    args = launch["args"]
+    for flag in FORBIDDEN_LAUNCH_FLAGS:
+        assert flag not in args
+    assert all("IsolateOrigins" not in arg and "site-per-process" not in arg for arg in args)
+    assert "--disable-dev-shm-usage" in args
+    assert any(arg.startswith("--crash-dumps-dir=") for arg in args)
+
+
+def _assert_closed_after_last_detail(events):
+    detail_at = [
+        index
+        for index, event in enumerate(events)
+        if len(event) >= 2 and event[0] == "goto" and "item?id=" in event[1]
+    ]
+    close_at = [index for index, event in enumerate(events) if event[0] == "close"]
+    assert close_at
+    assert len(close_at) == len(_launches(events))
+    if detail_at:
+        assert max(detail_at) < close_at[-1]
+    assert not any(event[0] == "goto" for event in events[close_at[-1] + 1 :])
+    assert not any(event[0] == "init_script" for event in events)
+
+
+def _run_scrape(
+    monkeypatch,
+    tmp_path,
+    scripts,
+    *,
+    task_overrides=None,
+    use_real_guard=False,
+    homepage_failures=0,
+    shutdown_sleep_seconds=None,
+):
     monkeypatch.setenv("MONITORING_ENABLED", "true")
     monkeypatch.setenv("ACCOUNT_ROTATION_RETRY_LIMIT", "3")
     monkeypatch.setenv("PROXY_ROTATION_RETRY_LIMIT", "3")
@@ -319,8 +380,19 @@ def _run_scrape(monkeypatch, tmp_path, scripts):
 
     events = []
     advance_calls = []
-    guard = _Guard()
     ai_calls = []
+    notifications = []
+    cleaned = []
+    homepage_failure_budget = [homepage_failures]
+    if use_real_guard:
+        guard = FailureGuard(
+            path=str(tmp_path / "task-failure-guard.json"),
+            threshold=3,
+            pause_seconds=3600,
+            tz_name="Asia/Shanghai",
+        )
+    else:
+        guard = _Guard()
 
     async def _parse(_payload, source):
         items = _listings()
@@ -334,47 +406,67 @@ def _run_scrape(monkeypatch, tmp_path, scripts):
         advance_calls.append(kwargs.get("page_num"))
         return PageAdvanceResult(advanced=False, stop_reason="test-should-not-advance")
 
-    async def _sleep(_seconds):
-        return None
+    async def _sleep(seconds):
+        events.append(("sleep", seconds))
 
     async def _analyze(*_args, **_kwargs):
         ai_calls.append(True)
         raise AssertionError("AI analysis should not run after a validation block")
 
+    async def _notify(*args, **_kwargs):
+        notifications.append(args)
+
+    def _cleanup(name):
+        cleaned.append(name)
+
     def _no_input(*_args, **_kwargs):
         raise AssertionError("scrape blocked on input")
 
-    monkeypatch.setattr(scraper, "async_playwright", lambda: _Playwright(events, scripts))
+    def _randint(low, high):
+        assert (low, high) == (3, 60)
+        return shutdown_sleep_seconds
+
+    monkeypatch.setattr(
+        scraper,
+        "async_playwright",
+        lambda: _Playwright(events, scripts, homepage_failure_budget),
+    )
     monkeypatch.setattr(scraper, "_parse_search_results_json", _parse)
     monkeypatch.setattr(scraper, "record_market_snapshots", _record)
     monkeypatch.setattr(scraper, "load_processed_link_keys", lambda _keyword: set())
     monkeypatch.setattr(scraper, "load_price_snapshots", lambda _keyword: [])
-    monkeypatch.setattr(scraper, "cleanup_task_images", lambda _name: None)
+    monkeypatch.setattr(scraper, "cleanup_task_images", _cleanup)
     monkeypatch.setattr(scraper, "advance_search_page", _advance)
     monkeypatch.setattr(scraper, "FAILURE_GUARD", guard)
     monkeypatch.setattr(scraper, "get_ai_analysis", _analyze)
+    monkeypatch.setattr(scraper, "send_ntfy_notification", _notify)
     monkeypatch.setattr(scraper.asyncio, "sleep", _sleep)
     monkeypatch.setattr("builtins.input", _no_input)
+    if shutdown_sleep_seconds is not None:
+        monkeypatch.setattr(scraper.random, "randint", _randint)
 
-    result = asyncio.run(
-        scraper.scrape_xianyu(
-            {
-                "task_name": "象印电饭煲-试抓",
-                "keyword": "象印 电饭煲",
-                "max_pages": 3,
-                "personal_only": False,
-                "free_shipping": False,
-                "account_state_file": str(state_path),
-                "account_strategy": "fixed",
-            }
-        )
-    )
+    task = {
+        "task_name": "象印电饭煲-试抓",
+        "keyword": "象印 电饭煲",
+        "max_pages": 3,
+        "personal_only": False,
+        "free_shipping": False,
+        "account_state_file": str(state_path),
+        "account_strategy": "fixed",
+    }
+    if task_overrides:
+        task.update(task_overrides)
+
+    result = asyncio.run(scraper.scrape_xianyu(task))
     return {
         "result": result,
         "events": events,
         "guard": guard,
         "advance_calls": advance_calls,
         "ai_calls": ai_calls,
+        "notifications": notifications,
+        "cleaned": cleaned,
+        "guard_path": tmp_path / "task-failure-guard.json",
     }
 
 
@@ -429,7 +521,9 @@ def test_first_validation_block_stops_later_detail_requests(
     assert outcome["advance_calls"] == []
     assert outcome["ai_calls"] == []
     assert outcome["result"] == 0
-    assert [item[0] for item in outcome["events"] if item[0] == "launch"] == ["launch"]
+    assert len(_launches(outcome["events"])) == 1
+    _assert_closed_after_last_detail(outcome["events"])
+    _assert_sandbox_kept(_launches(outcome["events"])[0])
     assert outcome["guard"].failures
     assert outcome["guard"].failures[0][0] == "象印电饭煲-试抓"
     assert reason in outcome["guard"].failures[0][1]
@@ -507,6 +601,10 @@ def test_business_detail_errors_do_not_terminate_the_run(monkeypatch, tmp_path, 
     ]
     assert "程序将终止" not in output
     assert "检测到风控或验证触发" not in output
+    assert "将尝试轮换" not in output
+    assert len(_launches(outcome["events"])) == 1
+    _assert_closed_after_last_detail(outcome["events"])
+    assert outcome["cleaned"] == ["象印电饭煲-试抓"]
     assert outcome["guard"].failures == []
     assert outcome["guard"].successes == ["象印电饭煲-试抓"]
 
@@ -535,3 +633,124 @@ def test_logged_terminate_stops_the_loop_even_if_abort_does_not_raise(
     assert "开始处理第 2/" not in output
     assert outcome["advance_calls"] == []
     assert outcome["ai_calls"] == []
+    _assert_closed_after_last_detail(outcome["events"])
+
+
+def _rotation_task(tmp_path):
+    account_dir = tmp_path / "accounts"
+    account_dir.mkdir()
+    for name in ("a.json", "b.json", "c.json"):
+        (account_dir / name).write_text('{"cookies":[]}', encoding="utf-8")
+    return {
+        "account_strategy": "rotate",
+        "account_state_file": None,
+        "account_rotation": {
+            "enabled": True,
+            "mode": "on_failure",
+            "retry_limit": 3,
+            "state_dir": str(account_dir),
+            "blacklist_ttl_sec": 300,
+        },
+        "proxy_rotation": {
+            "enabled": True,
+            "mode": "on_failure",
+            "retry_limit": 3,
+            "proxy_pool": "http://127.0.0.1:8001,http://127.0.0.1:8002,http://127.0.0.1:8003",
+        },
+    }
+
+
+def test_validation_block_does_not_rotate_and_records_real_failure(
+    monkeypatch, tmp_path, capsys
+):
+    outcome = _run_scrape(
+        monkeypatch,
+        tmp_path,
+        [
+            _block({"ret": ["FAIL_SYS_USER_VALIDATE"], "data": {}}),
+            _block(_success_detail()),
+            _block(_success_detail()),
+        ],
+        task_overrides=_rotation_task(tmp_path),
+        use_real_guard=True,
+        shutdown_sleep_seconds=17,
+    )
+    output = capsys.readouterr().out
+    events = outcome["events"]
+    launches = _launches(events)
+
+    assert _detail_gotos(events) == ["https://www.goofish.com/item?id=1"]
+    assert "https://www.goofish.com/item?id=2" not in _detail_gotos(events)
+    assert len(launches) == 1
+    assert output.count("账号轮换：使用登录状态") == 1
+    assert output.count("IP 轮换：使用代理") == 1
+    assert "将尝试轮换" not in output
+    assert launches[0]["proxy"]["server"].startswith("http://127.0.0.1:800")
+    _assert_sandbox_kept(launches[0])
+    _assert_closed_after_last_detail(events)
+
+    detail_at = next(
+        index
+        for index, event in enumerate(events)
+        if len(event) >= 2 and event[1] == "https://www.goofish.com/item?id=1"
+    )
+    sleep_at = [
+        index
+        for index, event in enumerate(events)
+        if event[0] == "sleep" and event[1] == 17
+    ]
+    close_at = next(index for index, event in enumerate(events) if event[0] == "close")
+    assert len(sleep_at) == 1
+    assert detail_at < sleep_at[0] < close_at
+    assert "长时间休眠 (17 秒)" in output
+    assert "长时间休眠结束，现在将安全退出。" in output
+    assert output.count("程序将终止") == 1
+    assert "检测到风控或验证触发: FAIL_SYS_USER_VALIDATE" in output
+    assert "处理商品详情时发生未知错误" not in output
+    assert "[FailureGuard] 任务 '象印电饭煲-试抓' 失败计数 1/3" in output
+    assert outcome["notifications"] == []
+    assert outcome["ai_calls"] == []
+    assert outcome["advance_calls"] == []
+    assert outcome["result"] == 0
+    assert outcome["cleaned"] == ["象印电饭煲-试抓"]
+
+    saved = json.loads(outcome["guard_path"].read_text(encoding="utf-8"))
+    entry = saved["tasks"]["象印电饭煲-试抓"]
+    assert entry["consecutive_failures"] == 1
+    assert entry["last_failure_reason"] == "FAIL_SYS_USER_VALIDATE"
+    assert entry["paused_until"] is None
+    assert entry.get("last_success_at") is None
+
+
+def test_ordinary_attempt_failure_still_rotates_account_and_proxy(
+    monkeypatch, tmp_path, capsys
+):
+    outcome = _run_scrape(
+        monkeypatch,
+        tmp_path,
+        [],
+        task_overrides=_rotation_task(tmp_path),
+        use_real_guard=True,
+        homepage_failures=3,
+    )
+    output = capsys.readouterr().out
+    launches = _launches(outcome["events"])
+    proxies = [launch["proxy"]["server"] for launch in launches]
+
+    assert _detail_gotos(outcome["events"]) == []
+    assert len(launches) == 3
+    assert len(set(proxies)) == 3
+    assert output.count("将尝试轮换账号/IP 后重试...") == 2
+    assert output.count("账号轮换：使用登录状态") == 3
+    assert output.count("IP 轮换：使用代理") == 3
+    assert "程序将终止" not in output
+    assert "FAIL_SYS_USER_VALIDATE" not in output
+    _assert_closed_after_last_detail(outcome["events"])
+    for launch in launches:
+        _assert_sandbox_kept(launch)
+
+    saved = json.loads(outcome["guard_path"].read_text(encoding="utf-8"))
+    entry = saved["tasks"]["象印电饭煲-试抓"]
+    assert entry["consecutive_failures"] == 1
+    assert entry["last_failure_reason"].startswith("RuntimeError: homepage failed")
+    assert outcome["notifications"] == []
