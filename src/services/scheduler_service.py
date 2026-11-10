@@ -8,6 +8,7 @@ from typing import List
 
 from src.core.cron_utils import build_cron_trigger
 from src.domain.models.task import Task
+from src.monitoring_gate import monitoring_block_reason, monitoring_enabled
 from src.services.process_service import ProcessService
 
 
@@ -50,9 +51,13 @@ class SchedulerService:
             return None
 
     async def reload_jobs(self, tasks: List[Task]):
-        """重新加载所有定时任务"""
+        """重新加载所有定时任务。准备模式只清空调度，不改任务记录。"""
         print("正在重新加载定时任务...")
         self.scheduler.remove_all_jobs()
+        if not monitoring_enabled():
+            print(monitoring_block_reason())
+            print("定时任务未注册。")
+            return
 
         for task in tasks:
             if task.enabled and task.cron:

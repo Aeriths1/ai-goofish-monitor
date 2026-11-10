@@ -27,6 +27,7 @@ class FakeProcess:
 
 
 def test_process_service_marks_task_stopped_when_process_exits(monkeypatch, tmp_path):
+    monkeypatch.setenv("MONITORING_ENABLED", "true")
     fake_process = FakeProcess(pid=4321)
     events = []
 

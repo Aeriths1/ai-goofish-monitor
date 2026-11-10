@@ -35,5 +35,10 @@ def test_chromium_launch_args_disable_crashpad_and_pin_dump_dir():
     assert "--disable-breakpad" in args
     assert "--disable-crash-reporter" in args
     assert "--crash-dumps-dir=/tmp/chromium-crashpad" in args
+    assert "--disable-web-security" not in args
+    assert "--disable-blink-features=AutomationControlled" not in args
+    assert "--no-sandbox" not in args
+    assert "--disable-setuid-sandbox" not in args
     feature_flags = [arg for arg in args if arg.startswith("--disable-features=")]
-    assert feature_flags == ["--disable-features=IsolateOrigins,site-per-process,Crashpad"]
+    assert feature_flags == ["--disable-features=Crashpad"]
+    assert all("IsolateOrigins" not in arg and "site-per-process" not in arg for arg in args)

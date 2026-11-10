@@ -9,6 +9,7 @@ import re
 
 from src.config import STATE_FILE
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+from src.monitoring_gate import monitoring_block_reason, monitoring_enabled
 from src.scraper import scrape_xianyu
 
 
@@ -32,6 +33,9 @@ async def main():
     parser.add_argument("--config", type=str, help="指定任务配置文件路径（传入时优先读取 JSON）")
     parser.add_argument("--task-name", type=str, help="只运行指定名称的单个任务 (用于定时任务调度)")
     args = parser.parse_args()
+    if not monitoring_enabled():
+        print(monitoring_block_reason())
+        return
 
     if args.config:
         if not os.path.exists(args.config):

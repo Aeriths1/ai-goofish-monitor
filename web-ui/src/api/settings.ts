@@ -78,6 +78,8 @@ export interface RotationSettings {
 }
 
 export interface SystemStatus {
+  monitoring_enabled?: boolean
+  monitoring_mode?: 'prep' | 'armed'
   scraper_running: boolean
   running_task_ids?: number[]
   ai_configured?: boolean

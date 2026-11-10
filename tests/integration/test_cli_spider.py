@@ -39,6 +39,7 @@ def test_cli_runs_single_task_with_prompt(tmp_path, load_json_fixture, monkeypat
     state_path.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(spider_v2, "STATE_FILE", str(state_path))
+    monkeypatch.setenv("MONITORING_ENABLED", "true")
 
     called = []
 
@@ -80,6 +81,7 @@ def test_cli_runs_keyword_mode_without_prompt_files(tmp_path, load_json_fixture,
     state_path = tmp_path / "state.json"
     state_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(spider_v2, "STATE_FILE", str(state_path))
+    monkeypatch.setenv("MONITORING_ENABLED", "true")
 
     captured = []
 

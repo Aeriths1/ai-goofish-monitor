@@ -80,6 +80,8 @@ docker compose up -d
 
 ### 第一次使用
 
+默认是安全准备模式（`MONITORING_ENABLED` 未设为 `true`）。这时导入示例任务或重启服务都不会自动抓取、调用 AI 或发通知。任务、登录态和历史结果会保留。确认要开始监控时，再把该变量设为 `true` 并重启。
+
 1. 打开默认 Web UI `http://127.0.0.1:8000` 并登录。
 2. 进入“闲鱼账号管理”，使用 [Chrome 扩展](https://chromewebstore.google.com/detail/xianyu-login-state-extrac/eidlpfjiodpigmfcahkmlenhppfklcoa) 导出并粘贴闲鱼登录态 JSON。
 3. 登录态文件会保存到 `state/` 目录，例如 `state/acc_1.json`。

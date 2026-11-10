@@ -14,6 +14,7 @@ from typing import Awaitable, Callable, Dict, TextIO
 from src.ai_handler import send_ntfy_notification
 from src.config import STATE_FILE
 from src.failure_guard import FailureGuard
+from src.monitoring_gate import monitoring_block_reason, monitoring_enabled
 from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync
 from src.utils import build_task_log_path
 
@@ -132,6 +133,10 @@ class ProcessService:
 
     async def start_task(self, task_id: int, task_name: str) -> bool:
         """启动任务进程"""
+        if not monitoring_enabled():
+            print(monitoring_block_reason())
+            return False
+
         await self._drain_finished_process(task_id)
         if self.is_running(task_id):
             print(f"任务 '{task_name}' (ID: {task_id}) 已在运行中")
