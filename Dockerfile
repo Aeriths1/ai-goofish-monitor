@@ -28,6 +28,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     RUNNING_IN_DOCKER=true \
+    MONITORING_ENABLED=false \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     TZ=Asia/Shanghai
 

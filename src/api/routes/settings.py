@@ -34,6 +34,7 @@ from src.services.notification_config_service import (
     prepare_notification_test_settings,
     prepare_notification_settings_update,
 )
+from src.monitoring_gate import monitoring_enabled
 from src.services.notification_service import build_notification_service
 from src.services.process_service import ProcessService
 
@@ -237,6 +238,8 @@ async def get_system_status(
         "notification_configured": notification_settings.has_any_notification_enabled(),
         "headless_mode": scraper_settings.run_headless,
         "running_in_docker": scraper_settings.running_in_docker,
+        "monitoring_enabled": monitoring_enabled(),
+        "monitoring_mode": "armed" if monitoring_enabled() else "prep",
         "scraper_running": len(running_task_ids) > 0,
         "running_task_ids": running_task_ids,
         "login_state_file": {

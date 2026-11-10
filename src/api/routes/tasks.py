@@ -14,6 +14,7 @@ from src.api.dependencies import (
 )
 from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
+from src.monitoring_gate import monitoring_block_reason, monitoring_enabled
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
 from src.services.task_generation_runner import (
@@ -263,6 +264,8 @@ async def start_task(
         raise HTTPException(status_code=400, detail="任务已被禁用，无法启动")
     if task.is_running:
         raise HTTPException(status_code=400, detail="任务已在运行中")
+    if not monitoring_enabled():
+        raise HTTPException(status_code=409, detail=monitoring_block_reason())
     success = await process_service.start_task(task_id, task.task_name)
     if not success:
         raise HTTPException(status_code=500, detail="启动任务失败")

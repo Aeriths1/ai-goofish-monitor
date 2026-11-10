@@ -163,6 +163,7 @@ def build_server_env(workspace: Path, repo_root: Path, port: int) -> dict[str, s
             "APP_DATABASE_FILE": str(workspace / "data" / "live.sqlite3"),
             "ACCOUNT_STATE_DIR": str(workspace / "state"),
             "RUN_HEADLESS": "true",
+            "MONITORING_ENABLED": "true",
             "SKIP_AI_ANALYSIS": "false",
             "AI_DEBUG_MODE": "true",
             "PYTHONUNBUFFERED": "1",

@@ -33,7 +33,8 @@ def test_create_list_update_delete_task(api_client, api_context, sample_task_pay
     assert response.json() == []
 
 
-def test_start_stop_task_updates_status(api_client, api_context, sample_task_payload):
+def test_start_stop_task_updates_status(api_client, api_context, sample_task_payload, monkeypatch):
+    monkeypatch.setenv("MONITORING_ENABLED", "true")
     response = api_client.post("/api/tasks/", json=sample_task_payload)
     assert response.status_code == 200
 
@@ -54,6 +55,24 @@ def test_start_stop_task_updates_status(api_client, api_context, sample_task_pay
     process_service = api_context["process_service"]
     assert process_service.started == [(0, sample_task_payload["task_name"])]
     assert process_service.stopped == [0]
+
+
+def test_start_task_stays_idle_in_prep_mode(api_client, api_context, sample_task_payload, monkeypatch):
+    monkeypatch.delenv("MONITORING_ENABLED", raising=False)
+    response = api_client.post("/api/tasks/", json=sample_task_payload)
+    assert response.status_code == 200
+
+    response = api_client.post("/api/tasks/start/0")
+    assert response.status_code == 409
+    assert "安全准备模式" in response.json()["detail"]
+
+    response = api_client.get("/api/tasks/0")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["is_running"] is False
+    assert body["keyword"] == sample_task_payload["keyword"]
+    assert api_context["process_service"].started == []
 
 
 def test_generate_keyword_mode_task_without_ai_criteria(api_client):
@@ -177,7 +196,9 @@ def test_delete_task_stops_runtime_and_reindexes_process_state(
     api_client,
     api_context,
     sample_task_payload,
+    monkeypatch,
 ):
+    monkeypatch.setenv("MONITORING_ENABLED", "true")
     second_payload = dict(sample_task_payload)
     second_payload["task_name"] = "Sony A7CR"
     second_payload["keyword"] = "sony a7cr"

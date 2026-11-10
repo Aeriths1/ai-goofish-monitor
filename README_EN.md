@@ -60,6 +60,8 @@ chmod +x start.sh
 
 ### First-Time Setup
 
+The default is safe prep mode. Until `MONITORING_ENABLED=true` and the service is restarted, example tasks and restarts do not scrape, call AI, or send notifications. Task rows, login-state files, and stored results stay in place.
+
 1. Open the default Web UI at `http://127.0.0.1:8000` and sign in.
 2. Go to "Xianyu Account Management" and use the [Chrome Extension](https://chromewebstore.google.com/detail/xianyu-login-state-extrac/eidlpfjiodpigmfcahkmlenhppfklcoa) to export and paste the Xianyu login-state JSON.
 3. Login-state files are stored in `state/`, for example `state/acc_1.json`.

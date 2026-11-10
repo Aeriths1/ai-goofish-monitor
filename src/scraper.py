@@ -63,6 +63,7 @@ from src.services.search_pagination import (
     advance_search_page,
     is_search_results_response,
 )
+from src.monitoring_gate import monitoring_block_reason, monitoring_enabled
 
 
 class RiskControlError(Exception):
@@ -117,19 +118,16 @@ CHROMIUM_CRASH_DUMPS_DIRNAME = "chromium-crashpad"
 def build_chromium_launch_args(crash_dumps_dir: str) -> list[str]:
     """Chromium 启动参数。
 
+    保持浏览器默认的同源策略、站点隔离和沙箱，不隐藏自动化特征。
     Docker 里的 Playwright Chromium 会拉起 chrome_crashpad_handler。数据库路径一旦落到
-    ``/``，handler 会自监控重启并占住大量内存。这里禁用 crash reporter，同时把 dump
-    目录固定到可写临时目录。
+    ``/``，handler 会自监控重启并占住大量内存。这里只禁用 crash reporter，同时把 dump
+    目录固定到可写临时目录。``--disable-dev-shm-usage`` 只避免小 ``/dev/shm`` 把页面打崩。
     """
     return [
-        "--disable-blink-features=AutomationControlled",
         "--disable-dev-shm-usage",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-web-security",
         "--disable-breakpad",
         "--disable-crash-reporter",
-        "--disable-features=IsolateOrigins,site-per-process,Crashpad",
+        "--disable-features=Crashpad",
         f"--crash-dumps-dir={crash_dumps_dir}",
     ]
 
@@ -508,6 +506,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     【核心执行器】
     根据单个任务配置，异步爬取闲鱼商品数据，并对每个新发现的商品进行实时的、独立的AI分析和通知。
     """
+    if not monitoring_enabled():
+        print(monitoring_block_reason())
+        return 0
+
     keyword = task_config["keyword"]
     max_pages = task_config.get("max_pages", 1)
     personal_only = task_config.get("personal_only", False)
@@ -660,30 +662,6 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 saver=save_to_jsonl,
             )
 
-            # 增强反检测脚本（模拟真实移动设备）
-            await context.add_init_script("""
-                // 移除webdriver标识
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-
-                // 模拟真实移动设备的navigator属性
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
-
-                // 添加chrome对象
-                window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
-
-                // 模拟触摸支持
-                Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5});
-
-                // 覆盖permissions查询（避免暴露自动化）
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({state: Notification.permission}) :
-                        originalQuery(parameters)
-                );
-            """)
-
             page = await context.new_page()
 
             try:
@@ -745,13 +723,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     print(
                         "\n==================== CRITICAL BLOCK DETECTED ===================="
                     )
-                    print("检测到闲鱼反爬虫验证弹窗 (baxia-dialog)，无法继续操作。")
-                    print("这通常是因为操作过于频繁或被识别为机器人。")
-                    print("建议：")
-                    print("1. 停止脚本一段时间再试。")
-                    print(
-                        "2. (推荐) 在 .env 文件中设置 RUN_HEADLESS=false，以非无头模式运行，这有助于绕过检测。"
-                    )
+                    print("检测到闲鱼验证弹窗 (baxia-dialog)，任务已停止。")
+                    print("本版本不会尝试绕过验证。")
                     print(f"任务 '{keyword}' 将在此处中止。")
                     print(
                         "==================================================================="
@@ -768,13 +741,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         "\n==================== CRITICAL BLOCK DETECTED ===================="
                     )
                     print(
-                        "检测到闲鱼反爬虫验证弹窗 (J_MIDDLEWARE_FRAME_WIDGET)，无法继续操作。"
+                        "检测到闲鱼验证弹窗 (J_MIDDLEWARE_FRAME_WIDGET)，任务已停止。"
                     )
-                    print("这通常是因为操作过于频繁或被识别为机器人。")
-                    print("建议：")
-                    print("1. 停止脚本一段时间再试。")
-                    print("2. (推荐) 更新登录状态文件，确保登录状态有效。")
-                    print("3. 降低任务执行频率，避免被识别为机器人。")
+                    print("本版本不会尝试绕过验证。")
                     print(f"任务 '{keyword}' 将在此处中止。")
                     print(
                         "==================================================================="

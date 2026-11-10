@@ -269,6 +269,16 @@ watch(selectedPrompt, async (value) => {
           </CardHeader>
           <CardContent>
             <div v-if="systemStatus" class="space-y-6">
+              <div class="flex items-center justify-between border-b pb-4">
+                <div>
+                  <h3 class="font-medium">{{ t('settings.status.monitoring') }}</h3>
+                  <p class="text-sm text-gray-500">{{ t('settings.status.monitoringDescription') }}</p>
+                </div>
+                <span :class="systemStatus.monitoring_enabled ? 'text-green-600 font-bold bg-green-50 px-3 py-1 rounded-full' : 'text-amber-700 font-bold bg-amber-50 px-3 py-1 rounded-full'">
+                  {{ systemStatus.monitoring_enabled ? t('settings.status.armed') : t('settings.status.prep') }}
+                </span>
+              </div>
+
               <!-- Scraper Process Status -->
               <div class="flex items-center justify-between border-b pb-4">
                 <div>
