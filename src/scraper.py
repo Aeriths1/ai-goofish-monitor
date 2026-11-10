@@ -67,7 +67,63 @@ from src.monitoring_gate import monitoring_block_reason, monitoring_enabled
 
 
 class RiskControlError(Exception):
-    pass
+    """闲鱼返回验证码、用户验证或反爬拦截，本轮抓取必须停止。"""
+
+
+# 处罚跳转 URL 上的这些标记与 FAIL_SYS_USER_VALIDATE 是同一类拦截。
+_USER_VALIDATION_URL_MARKERS = (
+    "FAIL_SYS_USER_VALIDATE",
+    "x5secdata",
+    "_____tmd_____",
+    "/punish",
+    "action=captcha",
+    "captchacapslide",
+)
+
+
+def user_validation_block_reason(payload: object) -> Optional[str]:
+    """详情接口若是用户验证/反爬拦截，返回稳定原因码，否则返回 None。
+
+    只检查 mtop ``ret`` 和处罚跳转 ``data.url``。商品标题、描述里出现相同字样不算拦截。
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    ret = payload.get("ret", [])
+    if isinstance(ret, str):
+        ret_text = ret
+    elif isinstance(ret, list):
+        ret_text = " ".join(str(part) for part in ret)
+    else:
+        ret_text = str(ret)
+
+    if "FAIL_SYS_USER_VALIDATE" in ret_text:
+        return "FAIL_SYS_USER_VALIDATE"
+    if "RGV587_ERROR" in ret_text or "被挤爆啦" in ret_text:
+        return "RGV587_ERROR"
+
+    data = payload.get("data")
+    url = ""
+    if isinstance(data, dict):
+        raw_url = data.get("url") or ""
+        url = raw_url if isinstance(raw_url, str) else str(raw_url)
+    if any(marker in url for marker in _USER_VALIDATION_URL_MARKERS):
+        return "FAIL_SYS_USER_VALIDATE"
+    return None
+
+
+async def _abort_for_user_validation(reason: str) -> None:
+    """记录终止并抛出风控错误。调用方必须让该异常离开详情循环。"""
+    print("\n==================== CRITICAL BLOCK DETECTED ====================")
+    print(f"检测到闲鱼反爬虫验证 ({reason})，程序将终止。")
+    long_sleep_duration = random.randint(3, 60)
+    print(
+        f"为避免账户风险，将执行一次长时间休眠 ({long_sleep_duration} 秒) 后再退出..."
+    )
+    await asyncio.sleep(long_sleep_duration)
+    print("长时间休眠结束，现在将安全退出。")
+    print("===================================================================")
+    raise RiskControlError(reason)
 
 
 class LoginRequiredError(Exception):
@@ -977,6 +1033,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
                     total_items_on_page = len(basic_items)
                     for i, item_data in enumerate(basic_items, 1):
+                        if stop_scraping:
+                            log_time("已触发风控终止，停止后续商品详情请求。")
+                            break
+
                         if debug_limit > 0 and processed_item_count >= debug_limit:
                             log_time(
                                 f"已达到调试上限 ({debug_limit})，停止获取新商品。"
@@ -1011,27 +1071,13 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             detail_response = await detail_info.value
                             if detail_response.ok:
                                 detail_json = await detail_response.json()
-
-                                ret_string = str(
-                                    await safe_get(detail_json, "ret", default=[])
-                                )
-                                if "FAIL_SYS_USER_VALIDATE" in ret_string:
-                                    print(
-                                        "\n==================== CRITICAL BLOCK DETECTED ===================="
-                                    )
-                                    print(
-                                        "检测到闲鱼反爬虫验证 (FAIL_SYS_USER_VALIDATE)，程序将终止。"
-                                    )
-                                    long_sleep_duration = random.randint(3, 60)
-                                    print(
-                                        f"为避免账户风险，将执行一次长时间休眠 ({long_sleep_duration} 秒) 后再退出..."
-                                    )
-                                    await asyncio.sleep(long_sleep_duration)
-                                    print("长时间休眠结束，现在将安全退出。")
-                                    print(
-                                        "==================================================================="
-                                    )
-                                    raise RiskControlError("FAIL_SYS_USER_VALIDATE")
+                                block_reason = user_validation_block_reason(detail_json)
+                                if block_reason:
+                                    # 先置位再抛错。终止异常一旦被误当成单条失败吞掉，
+                                    # 下一轮也会在打开下一个详情页之前停住。
+                                    stop_scraping = True
+                                    await _abort_for_user_validation(block_reason)
+                                    break
 
                                 # 解析商品详情数据并更新 item_data
                                 item_do = await safe_get(
@@ -1135,6 +1181,17 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 )
                                 await random_sleep(5, 10)
                             else:
+                                block_reason = None
+                                try:
+                                    block_reason = user_validation_block_reason(
+                                        await detail_response.json()
+                                    )
+                                except Exception:
+                                    block_reason = None
+                                if block_reason:
+                                    stop_scraping = True
+                                    await _abort_for_user_validation(block_reason)
+                                    break
                                 print(
                                     f"   错误: 获取商品详情API响应失败，状态码: {detail_response.status}"
                                 )
@@ -1150,6 +1207,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                         "----------------------------------------------------"
                                     )
 
+                        except RiskControlError:
+                            # 用户验证/反爬不是单条商品失败，不能在这里吞掉后继续请求下一条。
+                            stop_scraping = True
+                            raise
                         except PlaywrightTimeoutError:
                             print(f"   错误: 访问商品详情页或等待API响应超时。")
                         except Exception as e:
@@ -1172,6 +1233,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         f"Login required: redirected to {page.url} (cookies/state likely expired)"
                     ) from e
                 print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{e}")
+                raise
+            except RiskControlError:
                 raise
             except asyncio.CancelledError:
                 log_time("收到取消信号，正在终止当前爬虫任务...")
